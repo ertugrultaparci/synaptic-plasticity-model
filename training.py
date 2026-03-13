@@ -19,7 +19,6 @@ def train_inference_model(
     plasticity_rule,
     n_epochs=400,
     lr_optimizer=1e-3,
-    circuit_lr=0.01,
     observed_idx=None,
     n_input=100,
     n_output=50,
@@ -30,8 +29,7 @@ def train_inference_model(
     circuit = CircuitModel(
         n_input=n_input,
         n_output=n_output,
-        plasticity_rule=plasticity_rule,
-        lr=circuit_lr
+        plasticity_rule=plasticity_rule
     )
     
     optimizer = optim.Adam(plasticity_rule.parameters(), lr=lr_optimizer)
@@ -87,7 +85,7 @@ def toy_overfit_experiment():
     
     torch.manual_seed(42)
     
-    n_input, n_output, T = 20, 10, 20
+    n_input, n_output, T = 100, 500, 50
     
     X, O, W_gt, obs_idx = generate_ojas_data(
         n_input=n_input, n_output=n_output,
@@ -108,9 +106,8 @@ def toy_overfit_experiment():
         O_train=O,
         W_inits=W_inits,
         plasticity_rule=rule,
-        n_epochs=1000,          # FIX: was 500, use 1000
+        n_epochs=200,          # FIX: was 500, use 1000
         lr_optimizer=5e-3,      # FIX: was 1e-3, use 5e-3
-        circuit_lr=0.01,        # must match generate_ojas_data lr=0.01
         observed_idx=obs_idx,
         n_input=n_input,
         n_output=n_output,
@@ -122,7 +119,7 @@ def toy_overfit_experiment():
     # ── Diagnostic: check gradient flow manually ──────────────────────────
     print("\n--- Gradient check ---")
     rule2 = TaylorPlasticityRule(max_order=2, include_reward=False)
-    circuit2 = CircuitModel(n_input, n_output, rule2, lr=0.01)
+    circuit2 = CircuitModel(n_input, n_output, rule2)
     m = circuit2.forward(X[0], W_init=W_inits[0], observed_idx=obs_idx)
     loss = mse_loss(m, O[0])
     loss.backward()

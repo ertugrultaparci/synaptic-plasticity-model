@@ -74,8 +74,7 @@ def generate_ojas_data(
     T=50,               # timesteps per trajectory
     n_trajectories=50,  # number of independent trajectories
     noise_std=0.0,      # additive Gaussian noise on observations
-    sparsity=1.0,       # fraction of output neurons observed
-    lr=0.01,            # learning rate for weight updates
+    sparsity=1.0,       # fraction of output neurons observed         
     seed=42
 ):
     """
@@ -88,7 +87,7 @@ def generate_ojas_data(
         observed_idx: which neuron indices are observed
     """
     torch.manual_seed(seed)
-    np.random.seed(seed)
+    lr = 1 / n_input  # Normalize learning rate by input size (as in paper Appendix A.3)
     
     # Which output neurons are observed (for sparsity experiments)
     n_observed = int(n_output * sparsity)
@@ -98,14 +97,16 @@ def generate_ojas_data(
     
     for traj in range(n_trajectories):
         # Initialize weights (Kaiming-style: zero-mean Gaussian)
-        # TODO: TORCH KAIMING KULLANABİLİR MİYİZ?
-        W = torch.randn(n_output, n_input) * (1.0 / np.sqrt(n_input))
+        # TORCH KAIMING NORMAL: std = gain / sqrt(fan_in) where gain=1 for linear/sigmoid
+
+        W = torch.empty(n_output, n_input)
+        torch.nn.init.kaiming_normal_(W, mode='fan_in') # Leaky ReLU for nonlinearity, but sigmoid is used in forward pass.
         
         X_traj, O_traj, W_traj = [], [], [W.clone()]
         
         for t in range(T):
             # Input: sampled from Gaussian with mean 0, var 0.1 (as in paper Appendix A.3)
-            x = torch.randn(n_input) * np.sqrt(0.1)
+            x = torch.randn(n_input) * torch.sqrt(torch.tensor(0.1))
             
             # Forward pass
             y = sigmoid(W @ x)  # shape (n_output,)
