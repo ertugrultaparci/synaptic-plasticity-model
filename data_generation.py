@@ -70,7 +70,7 @@ def ojas_rule(x, y, W):
 
 def generate_ojas_data(
     n_input=100,
-    n_output=50,
+    n_output=1000,
     T=50,               # timesteps per trajectory
     n_trajectories=50,  # number of independent trajectories
     noise_std=0.0,      # additive Gaussian noise on observations

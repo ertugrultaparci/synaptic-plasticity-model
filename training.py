@@ -22,9 +22,8 @@ def train_inference_model(
     circuit_lr=0.01,
     observed_idx=None,
     n_input=100,
-    n_output=50,
-    grad_clip=1.0,      # FIX: was 0.2, too aggressive for small nets
-    l1_lambda=0.0,
+    n_output=1000,
+    grad_clip=0.2,      
     verbose=True
 ):
     circuit = CircuitModel(
@@ -55,10 +54,6 @@ def train_inference_model(
             m_traj = circuit.forward(X, W_init=W_init, observed_idx=observed_idx)
             
             loss = mse_loss(m_traj, O)
-            
-            if l1_lambda > 0 and hasattr(plasticity_rule, 'theta'):
-                loss = loss + l1_lambda * plasticity_rule.theta.abs().sum()
-            
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_(
@@ -108,14 +103,13 @@ def toy_overfit_experiment():
         O_train=O,
         W_inits=W_inits,
         plasticity_rule=rule,
-        n_epochs=1000,          # FIX: was 500, use 1000
-        lr_optimizer=5e-3,      # FIX: was 1e-3, use 5e-3
-        circuit_lr=0.01,        # must match generate_ojas_data lr=0.01
+        n_epochs=400,          
+        lr_optimizer=5e-3,      
+        circuit_lr=0.01,       
         observed_idx=obs_idx,
         n_input=n_input,
         n_output=n_output,
-        grad_clip=1.0,          # FIX: was 0.2
-        l1_lambda=0.0,          # FIX: no regularization for toy test
+        grad_clip=1.0,
         verbose=True
     )
     

@@ -3,13 +3,12 @@ import torch
 import torch.nn as nn
 
 class CircuitModel(nn.Module):
-    # TODO: lr = 0.01 olmayacak 1/input size olacak!
-    def __init__(self, n_input, n_output, plasticity_rule, lr=0.01):
+    def __init__(self, n_input, n_output, plasticity_rule, lr=None):
         super().__init__()
         self.n_input = n_input
         self.n_output = n_output
         self.plasticity_rule = plasticity_rule
-        self.lr = lr
+        self.lr = lr if lr is not None else 1.0 / n_input
     
     def forward(self, X, W_init=None, observed_idx=None):
         """
@@ -21,8 +20,9 @@ class CircuitModel(nn.Module):
         
         if W_init is None:
             # Only random-init if no W_init provided (not recommended for toy test)
+            device = next(self.plasticity_rule.parameters()).device
             W = torch.randn(self.n_output, self.n_input,
-                            requires_grad=False) / (self.n_input ** 0.5)
+                            device=device) / (self.n_input ** 0.5)
         else:
             W = W_init.clone()  # clone so we don't modify the stored init
 
