@@ -19,10 +19,10 @@ torch.set_default_device(device)
 print(f"Global default device set to: {device}")
 
 def run_ojas_recovery(
-    n_input= 100, n_output=200, T=50,
-    n_trajectories=50, n_epochs=250,
+    n_input= 100, n_output=1000, T=50,
+    n_trajectories=50, n_epochs=400,
     noise_std=0.0, sparsity=1.0,
-    lr_optimizer=2e-3, grad_clip=0.2, l1_lambda=0.0,
+    lr_optimizer=1e-3, grad_clip=0.2, l1_lambda=0.0,
     seed=2, verbose=True
 ):
     torch.manual_seed(seed)
@@ -57,7 +57,7 @@ def run_ojas_recovery(
         'other_thetas': []
     }
     
-    batch_size = 10  # THE FIX: Process in chunks of 10 to save VRAM
+    batch_size = 20  # THE FIX: Process in chunks of 20 to save VRAM
     
     for epoch in range(n_epochs):
         epoch_loss = 0.0
@@ -86,7 +86,7 @@ def run_ojas_recovery(
             
         epoch_loss /= len(X_train)
         # 1. Track thetas for Panel C
-        t_vals = rule.theta.detach().cpu().numpy()
+        t_vals = rule.theta.detach().gpu().numpy()
         history['theta_110'].append(t_vals[idx_110])
         history['theta_021'].append(t_vals[idx_021])
         history['other_thetas'].append(t_vals[other_idx])
@@ -99,7 +99,7 @@ def run_ojas_recovery(
                 min_T = min(W_pred.shape[1], W_gt_train.shape[1])
                 # Calculate MSE for *each timestep* across the batch
                 err_per_t = ((W_pred[:, :min_T] - W_gt_train[:, :min_T]) ** 2).mean(dim=(0, 2, 3))
-                history['weight_error_over_time'].append(err_per_t.cpu().numpy().tolist())
+                history['weight_error_over_time'].append(err_per_t.gpu().numpy().tolist())
         else:
             # Copy last calculated row to keep 2D shape consistent
             history['weight_error_over_time'].append(history['weight_error_over_time'][-1])
@@ -157,17 +157,12 @@ def compute_r2(W_pred, W_true, W_init):
     # so we can subtract it from the full time sequence
     W_init_expanded = W_init.unsqueeze(1)
     
-    delta_W_pred = (W_pred - W_init_expanded).cpu().numpy().flatten()
-    delta_W_true = (W_true - W_init_expanded).cpu().numpy().flatten()
+    delta_W_pred = (W_pred - W_init_expanded).gpu().numpy().flatten()
+    delta_W_true = (W_true - W_init_expanded).gpu().numpy().flatten()
     
     ss_res = np.sum((delta_W_true - delta_W_pred) ** 2)
     ss_tot = np.sum((delta_W_true - delta_W_true.mean()) ** 2)
     return 1 - ss_res / (ss_tot + 1e-10)
-
-
-
-
-
 
 # ==============================================================================
 # EXPERIMENT RUNNERS
@@ -337,7 +332,7 @@ if __name__ == "__main__":
     plot_theta_trajectories(hist)
     
     # 2. Run the massive sweep for Panels D, E & F
-    #n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
+    n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
     
     # 3. Graph everything in one beautiful Matplotlib window
-    #plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)
+    plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)
