@@ -86,7 +86,7 @@ def run_ojas_recovery(
             
         epoch_loss /= len(X_train)
         # 1. Track thetas for Panel C
-        t_vals = rule.theta.detach().gpu().numpy()
+        t_vals = rule.theta.detach().cpu().numpy()
         history['theta_110'].append(t_vals[idx_110])
         history['theta_021'].append(t_vals[idx_021])
         history['other_thetas'].append(t_vals[other_idx])
@@ -99,7 +99,7 @@ def run_ojas_recovery(
                 min_T = min(W_pred.shape[1], W_gt_train.shape[1])
                 # Calculate MSE for *each timestep* across the batch
                 err_per_t = ((W_pred[:, :min_T] - W_gt_train[:, :min_T]) ** 2).mean(dim=(0, 2, 3))
-                history['weight_error_over_time'].append(err_per_t.gpu().numpy().tolist())
+                history['weight_error_over_time'].append(err_per_t.cpu().numpy().tolist())
         else:
             # Copy last calculated row to keep 2D shape consistent
             history['weight_error_over_time'].append(history['weight_error_over_time'][-1])
@@ -157,8 +157,8 @@ def compute_r2(W_pred, W_true, W_init):
     # so we can subtract it from the full time sequence
     W_init_expanded = W_init.unsqueeze(1)
     
-    delta_W_pred = (W_pred - W_init_expanded).gpu().numpy().flatten()
-    delta_W_true = (W_true - W_init_expanded).gpu().numpy().flatten()
+    delta_W_pred = (W_pred - W_init_expanded).cpu().numpy().flatten()
+    delta_W_true = (W_true - W_init_expanded).cpu().numpy().flatten()
     
     ss_res = np.sum((delta_W_true - delta_W_pred) ** 2)
     ss_tot = np.sum((delta_W_true - delta_W_true.mean()) ** 2)
