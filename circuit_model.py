@@ -11,7 +11,7 @@ class CircuitModel(nn.Module):
 
     def forward(self, X, W_init, observed_idx=None):
         B, T, _ = X.shape
-        W = W_init.clone()
+        W = W_init.clone().detach()
         m_traj = []
 
         for t in range(T):

@@ -8,6 +8,7 @@ from data_generation import generate_ojas_data
 from VectorizedTaylor import TaylorPlasticityRule
 from circuit_model import CircuitModel
 from training import mse_loss
+import torch.nn as nn
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full Oja's Recovery Experiment
@@ -18,11 +19,11 @@ torch.set_default_device(device)
 print(f"Global default device set to: {device}")
 
 def run_ojas_recovery(
-    n_input= 80, n_output=200, T=50,
+    n_input= 100, n_output=200, T=50,
     n_trajectories=50, n_epochs=250,
     noise_std=0.0, sparsity=1.0,
-    lr_optimizer=5e-3, grad_clip=0.2, l1_lambda=0.0,
-    seed=42, verbose=True
+    lr_optimizer=2e-3, grad_clip=0.2, l1_lambda=0.0,
+    seed=2, verbose=True
 ):
     torch.manual_seed(seed)
 
@@ -75,8 +76,6 @@ def run_ojas_recovery(
             m_pred = circuit.forward(X_batch, W_init=W_init_batch, observed_idx=obs_idx)
             
             loss = mse_loss(m_pred, O_batch)
-            if l1_lambda > 0:
-                loss = loss + l1_lambda * rule.theta.abs().sum()
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(rule.parameters(), grad_clip)
@@ -166,18 +165,6 @@ def compute_r2(W_pred, W_true, W_init):
     return 1 - ss_res / (ss_tot + 1e-10)
 
 
-def compute_r2(W_pred, W_true, W_init):
-    """R² calculated across the entire batched tensor simultaneously."""
-    # W_init is (B, N_out, N_in). We unsqueeze it to (B, 1, N_out, N_in) 
-    # so we can subtract it from the full time sequence
-    W_init_expanded = W_init.unsqueeze(1)
-    
-    delta_W_pred = (W_pred - W_init_expanded).cpu().numpy().flatten()
-    delta_W_true = (W_true - W_init_expanded).cpu().numpy().flatten()
-    
-    ss_res = np.sum((delta_W_true - delta_W_pred) ** 2)
-    ss_tot = np.sum((delta_W_true - delta_W_true.mean()) ** 2)
-    return 1 - ss_res / (ss_tot + 1e-10)
 
 
 
@@ -232,6 +219,44 @@ def run_robustness_grid():
             print(f"  -> R² = {np.mean(scores):.3f}")
 
     return noise_levels, sparsity_levels, r2_matrix, r2_distributions
+
+
+def plot_theta_trajectories(history):
+    """
+    Standalone plot to visualize only the convergence of the Taylor coefficients.
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    coral = '#FF7F50'
+
+    epochs = np.arange(len(history['theta_110']))
+    
+    # Ground truth reference lines
+    ax.axhline(1.0, color='lightgreen', linestyle='--', zorder=1)
+    ax.axhline(0.0, color='lightgreen', linestyle='--', zorder=1)
+    ax.axhline(-1.0, color='lightgreen', linestyle='--', zorder=1)
+
+    # Plot all the non-Oja theta coefficients (the ones that should go to 0)
+    for ot in history['other_thetas']:
+        ax.plot(epochs, ot, color='dimgray', linewidth=1.5, zorder=2)
+        
+    # Highlight the target Oja's rule coefficients
+    ax.plot(epochs, history['theta_110'], color=coral, linewidth=2, zorder=3)
+    ax.plot(epochs, history['theta_021'], color=coral, linewidth=2, zorder=3)
+
+    # Add text labels tracking the target curves
+    ax.text(epochs[-1] * 0.8, 0.8, r'$\theta_{110}$', color=coral, fontsize=14, fontweight='bold')
+    ax.text(epochs[-1] * 0.8, -0.8, r'$\theta_{021}$', color=coral, fontsize=14, fontweight='bold')
+    
+    # Formatting
+    ax.set_xlabel("Training Epochs", fontsize=12)
+    ax.set_ylabel(r"$\theta_{\alpha,\beta,\gamma}$ Value", fontsize=12)
+    ax.set_ylim(-1.2, 1.2)
+    ax.set_title("Taylor Coefficient Convergence", fontweight='bold', fontsize=14)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig("standalone_theta_convergence.png", dpi=200)
+    plt.show()
 
 def plot_all_figures(history, noise_levels, sparsity_levels, r2_matrix, r2_distributions):
     fig = plt.figure(figsize=(16, 9))
@@ -309,9 +334,10 @@ def plot_all_figures(history, noise_levels, sparsity_levels, r2_matrix, r2_distr
 if __name__ == "__main__":
     # 1. Run the deep dive for Panels B & C
     hist = run_dynamics_experiment()
+    plot_theta_trajectories(hist)
     
     # 2. Run the massive sweep for Panels D, E & F
-    n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
+    #n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
     
     # 3. Graph everything in one beautiful Matplotlib window
-    plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)
+    #plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)

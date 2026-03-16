@@ -12,11 +12,27 @@ class TaylorPlasticityRule(nn.Module):
         self.include_reward = include_reward
         
         r_range = range(max_order + 1) if include_reward else [0]
+        """
         self.indices = [
             (a, b, g, r) for a, b, g, r in product(
                 range(max_order + 1), range(max_order + 1),
                 range(max_order + 1), r_range
             )
+            if (a + b + g) <= max_order + 1
+        ]
+        """
+
+        
+        self.indices = [
+            #(1,0,0,0),   # x
+            #(0,1,0,0),   # y
+            #(0,0,1,0),   # w
+            (1,1,0,0),   # xy
+            (1,0,1,0),   # xw
+            #(0,1,1,0),   # yw
+            (2,0,0,0),   # x²
+            (0,2,0,0),   # y²
+            (0,2,1,0),   # y²w  ← Oja decay
         ]
         
         n_terms = len(self.indices)
