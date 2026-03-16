@@ -7,7 +7,8 @@ class CircuitModel(nn.Module):
         self.n_input = n_input
         self.n_output = n_output
         self.plasticity_rule = plasticity_rule
-        self.lr = 1 / n_input
+        self.lr = (1 / n_input) 
+        
 
     def forward(self, X, W_init, observed_idx=None):
         B, T, _ = X.shape
@@ -17,7 +18,7 @@ class CircuitModel(nn.Module):
         for t in range(T):
             x_t = X[:, t, :]  
             
-            pre = torch.bmm(W, x_t.unsqueeze(-1)).squeeze(-1)
+            pre = torch.einsum('boi,bi->bo', W, x_t)
             y_t = torch.sigmoid(pre) 
 
             if observed_idx is not None:

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 from data_generation import generate_ojas_data
-from VectorizedTaylor import TaylorPlasticityRule
+from VectorizedTaylor import TaylorPlasticityRule, TaylorRule3Var
 from circuit_model import CircuitModel
 from training import mse_loss
 import torch.nn as nn
@@ -19,14 +19,13 @@ torch.set_default_device(device)
 print(f"Global default device set to: {device}")
 
 def run_ojas_recovery(
-    n_input= 100, n_output=200, T=50,
+    n_input= 100, n_output=1000, T=50,
     n_trajectories=50, n_epochs=250,
     noise_std=0.0, sparsity=1.0,
-    lr_optimizer=2e-3, grad_clip=0.2, l1_lambda=0.0,
-    seed=2, verbose=True
+    lr_optimizer=1e-3, grad_clip=0.2, l1_lambda=0.0,
+    seed=22, verbose=True
 ):
     torch.manual_seed(seed)
-
     
     # ── 1. Generate & Move Data ───────────────────────────────────────────
     X_train, O_train, W_gt_train, obs_idx = generate_ojas_data(
@@ -42,13 +41,13 @@ def run_ojas_recovery(
         
     W_inits_train = W_gt_train[:, 0]
     
-    rule = TaylorPlasticityRule(max_order=2, include_reward=False).to(device)
+    rule = TaylorRule3Var().to(device)
     circuit = CircuitModel(n_input, n_output, rule).to(device)
     optimizer = optim.Adam(rule.parameters(), lr=lr_optimizer)
     
-    idx_110 = rule.indices.index((1, 1, 0, 0)) # Hebbian
-    idx_021 = rule.indices.index((0, 2, 1, 0)) # Decay
-    other_idx = [k for k in range(len(rule.indices)) if k not in (idx_110, idx_021)]
+    mask_other = np.ones((3, 3, 3), dtype=bool)
+    mask_other[1, 1, 0] = False # Exclude Hebbian
+    mask_other[0, 2, 1] = False # Exclude Decay
     
     history = {
         'weight_error_over_time': [],
@@ -57,57 +56,54 @@ def run_ojas_recovery(
         'other_thetas': []
     }
     
-    batch_size = 10  # THE FIX: Process in chunks of 10 to save VRAM
-    
     for epoch in range(n_epochs):
         epoch_loss = 0.0
         perm = torch.randperm(len(X_train))
         
-        # Loop through the data in chunks
-        for i in range(0, len(X_train), batch_size):
-            idx = perm[i:i + batch_size]
+        # FIX 1: Stochastic Updates (Batch Size = 1)
+        # Keeps the BPTT computational graph tiny and stays in GPU cache.
+        for i in range(len(X_train)):
+            idx = perm[i]
             
-            X_batch = X_train[idx]
-            W_init_batch = W_inits_train[idx]
-            O_batch = O_train[idx]
+            # Slicing with [idx:idx+1] maintains the batch dimension (B=1)
+            X_batch = X_train[idx:idx+1]
+            W_init_batch = W_inits_train[idx:idx+1]
+            O_batch = O_train[idx:idx+1]
             
             optimizer.zero_grad()
             
             m_pred = circuit.forward(X_batch, W_init=W_init_batch, observed_idx=obs_idx)
-            
             loss = mse_loss(m_pred, O_batch)
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(rule.parameters(), grad_clip)
             optimizer.step()
             
-            # Weight the loss by the batch size for an accurate epoch average
-            epoch_loss += loss.item() * len(idx)
+            epoch_loss += loss.item()
             
         epoch_loss /= len(X_train)
-        # 1. Track thetas for Panel C
-        t_vals = rule.theta.detach().cpu().numpy()
-        history['theta_110'].append(t_vals[idx_110])
-        history['theta_021'].append(t_vals[idx_021])
-        history['other_thetas'].append(t_vals[other_idx])
         
-        # 2. Track Weight MSE across Time for Panel B's Heatmap
+        # FIX 2: Move CPU syncing outside the inner batch loop!
+        # We only transfer memory from GPU to CPU once per epoch now.
+        t_vals = rule.coeffs.detach().cpu().numpy()
+        history['theta_110'].append(t_vals[1, 1, 0])
+        history['theta_021'].append(t_vals[0, 2, 1])
+        history['other_thetas'].append(t_vals[mask_other].tolist())
+        
+        # FIX 3: Efficient weight tracking
         if epoch % 10 == 0 or epoch == n_epochs - 1:
             with torch.no_grad():
                 _, W_pred = circuit_forward_with_weights(circuit, X_train, W_inits_train)
-                # Ensure time dimensions match
                 min_T = min(W_pred.shape[1], W_gt_train.shape[1])
-                # Calculate MSE for *each timestep* across the batch
                 err_per_t = ((W_pred[:, :min_T] - W_gt_train[:, :min_T]) ** 2).mean(dim=(0, 2, 3))
                 history['weight_error_over_time'].append(err_per_t.cpu().numpy().tolist())
         else:
-            # Copy last calculated row to keep 2D shape consistent
             history['weight_error_over_time'].append(history['weight_error_over_time'][-1])
             
         if verbose and epoch % 50 == 0:
-            # Print the mean of the last row's errors
             print(f"Epoch {epoch:4d} | Activity Loss: {epoch_loss:.6f} | Final W-MSE: {history['weight_error_over_time'][-1][-1]:.6f}")
-    # ── 3. Evaluate: R² on FRESH test weight trajectories ─────────────────
+
+    # ── Evaluate: R² on FRESH test weight trajectories ─────────────────
     rule.eval()
     with torch.no_grad():
         test_seed = seed + 999 
@@ -120,10 +116,7 @@ def run_ojas_recovery(
         W_gt_test = W_gt_test.to(device)
         W_inits_test = W_gt_test[:, 0]
         
-        # ONE LINE to predict all test trajectories instantly
         _, W_pred_test = circuit_forward_with_weights(circuit, X_test, W_inits_test)
-        
-        # Calculates global R2 score across the entire test batch
         mean_r2 = compute_r2(W_pred_test, W_gt_test, W_inits_test)
     
     if verbose:
@@ -137,13 +130,15 @@ def circuit_forward_with_weights(circuit, X, W_init):
     W = W_init.clone()
     m_traj, W_traj = [], [W.clone()]
     
+    # FIX 4: Cleaner matrix operations inside the loop
     for t in range(T):
         x_t = X[:, t, :]
-        pre = torch.bmm(W, x_t.unsqueeze(-1)).squeeze(-1)
+        
+        # torch.einsum is heavily optimized and avoids unsqueeze/squeeze overhead
+        pre = torch.einsum('boi,bi->bo', W, x_t)
         y_t = torch.sigmoid(pre)
         m_traj.append(y_t)
         
-        # PASS DIRECTLY: No unsqueeze, no x_j, no y_i
         dW = circuit.plasticity_rule(x_t, y_t, W)
         W = W + circuit.lr * dW
         W_traj.append(W.clone())

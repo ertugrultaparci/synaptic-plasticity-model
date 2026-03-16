@@ -87,7 +87,7 @@ def generate_ojas_data(
         observed_idx: which neuron indices are observed
     """
     torch.manual_seed(seed)
-    lr = 1 / n_input  # Normalize learning rate by input size (as in paper Appendix A.3)
+    lr = (1 / n_input)   # Normalize learning rate by input size (as in paper Appendix A.3)
     
     # Which output neurons are observed (for sparsity experiments)
     n_observed = int(n_output * sparsity)
@@ -99,8 +99,8 @@ def generate_ojas_data(
         # Initialize weights (Kaiming-style: zero-mean Gaussian)
         # TORCH KAIMING NORMAL: std = gain / sqrt(fan_in) where gain=1 for linear/sigmoid
 
-        W = torch.empty(n_output, n_input)
-        torch.nn.init.kaiming_normal_(W, mode='fan_in') # Leaky ReLU for nonlinearity, but sigmoid is used in forward pass.
+        std_w = (2.0 / n_input) ** 0.5
+        W = torch.randn(n_output, n_input) * std_w
         
         X_traj, O_traj, W_traj = [], [], [W.clone()]
         

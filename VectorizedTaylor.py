@@ -80,7 +80,29 @@ class TaylorPlasticityRule(nn.Module):
         
         # Final output shape: (Batch, N_out, N_in)
         return dW
-
+    
+class TaylorRule3Var(nn.Module):
+    """Taylor series plasticity rule with 3 variables (x, y, w)."""
+    def __init__(self, init_scale=1e-4):
+        super().__init__()
+        self.coeffs = nn.Parameter(torch.randn(3, 3, 3) * init_scale)
+    
+    def forward(self, x, y, w):
+        # 1. Create stacks ONLY for the small vectors x and y.
+        # We explicitly use dim=1 to map to the 'a' and 'b' indices.
+        X = torch.stack([torch.ones_like(x), x, x**2], dim=1)  # Shape: (B, 3, N_in)
+        Y = torch.stack([torch.ones_like(y), y, y**2], dim=1)  # Shape: (B, 3, N_out)
+        
+        # 2. Compute the interaction between x, y, and theta FIRST.
+        # This is a much lighter 3-tensor contraction.
+        # H Shape: (Batch, c_poly_degree, N_out, N_in)
+        H = torch.einsum('abc, kaj, kbi -> kcij', self.coeffs, X, Y)
+        
+        # 3. Apply w as a simple broadcasted polynomial at the very end.
+        # This completely avoids allocating a (3, B, N_out, N_in) intermediate tensor!
+        dW = H[:, 0, :, :] + H[:, 1, :, :] * w + H[:, 2, :, :] * (w ** 2)
+        
+        return dW
     def get_named_coefficients(self):
         print("\n=== Taylor Coefficients ===")
         for k, (a, b, g, rd) in enumerate(self.indices):
