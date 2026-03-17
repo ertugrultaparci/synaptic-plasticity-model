@@ -57,9 +57,9 @@ class TaylorPlasticityRule(nn.Module):
         # Expand to (n_output, n_input) for vectorized computation
         # x_j: broadcast along output dim → (1, n_input)
         # y_i: broadcast along input dim  → (n_output, 1)
-        x = x_j.unsqueeze(0)   # (1, n_input)
-        y = y_i.unsqueeze(1)   # (n_output, 1)
-        w = w_ij               # (n_output, n_input)
+        x = x_j.unsqueeze(1)   # (B, 1, n_input) 
+        y = y_i.unsqueeze(2)   # (B, n_output, 1)
+        w = w_ij               # (B, n_output, n_input)
         r_val = r if r is not None else torch.tensor(0.0)
         
         dW = torch.zeros_like(w)

@@ -43,9 +43,9 @@ def train_inference_model(
         perm = torch.randperm(n_traj)
         
         for traj_idx in perm:
-            X = X_train[traj_idx]
-            O = O_train[traj_idx]
-            W_init = W_inits[traj_idx]    # FIX: use stored init
+            X = X_train[traj_idx].unsqueeze(0)
+            O = O_train[traj_idx].unsqueeze(0)
+            W_init = W_inits[traj_idx].unsqueeze(0)    # FIX: use stored init
             
             optimizer.zero_grad()
             
@@ -106,7 +106,7 @@ def toy_overfit_experiment():
         O_train=O,
         W_inits=W_inits,
         plasticity_rule=rule,
-        n_epochs=200,          # FIX: was 500, use 1000
+        n_epochs=1000,          # FIX: was 500, use 1000
         lr_optimizer=5e-3,      # FIX: was 1e-3, use 5e-3
         observed_idx=obs_idx,
         n_input=n_input,
@@ -120,8 +120,8 @@ def toy_overfit_experiment():
     print("\n--- Gradient check ---")
     rule2 = TaylorPlasticityRule(max_order=2, include_reward=False)
     circuit2 = CircuitModel(n_input, n_output, rule2)
-    m = circuit2.forward(X[0], W_init=W_inits[0], observed_idx=obs_idx)
-    loss = mse_loss(m, O[0])
+    m = circuit2.forward(X, W_init=W_inits, observed_idx=obs_idx)
+    loss = mse_loss(m, O)
     loss.backward()
     grad_norm = rule2.theta.grad.norm().item()
     print(f"Gradient norm on theta after 1 backward: {grad_norm:.6f}")
