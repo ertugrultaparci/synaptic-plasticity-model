@@ -70,7 +70,7 @@ def ojas_rule(x, y, W):
 
 def generate_ojas_data(
     n_input=100,
-    n_output=50,
+    n_output=1000,
     T=50,               # timesteps per trajectory
     n_trajectories=50,  # number of independent trajectories
     noise_std=0.0,      # additive Gaussian noise on observations
@@ -87,11 +87,13 @@ def generate_ojas_data(
         observed_idx: which neuron indices are observed
     """
     torch.manual_seed(seed)
-    lr = (1 / n_input)   # Normalize learning rate by input size (as in paper Appendix A.3)
+    lr = 1.0   # Normalize learning rate by input size (as in paper Appendix A.3)
     
     # Which output neurons are observed (for sparsity experiments)
     n_observed = int(n_output * sparsity)
     observed_idx = torch.randperm(n_output)[:n_observed]
+
+   
     
     X_all, O_all, W_all = [], [], []
     
@@ -115,10 +117,11 @@ def generate_ojas_data(
             o = y[observed_idx].clone()
             if noise_std > 0:
                 o = o + torch.randn_like(o) * noise_std
+                o = torch.clamp(o, 0.0, 1.0)
             
             # Weight update using Oja's rule
             dW = ojas_rule(x, y, W)
-            W = W + lr * dW
+            W = W +  lr *dW
             
             X_traj.append(x)
             O_traj.append(o)

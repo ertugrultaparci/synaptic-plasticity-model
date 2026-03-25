@@ -8,7 +8,7 @@ from data_generation import generate_ojas_data
 from VectorizedTaylor import TaylorPlasticityRule, TaylorRule3Var
 from circuit_model import CircuitModel
 from training import mse_loss
-import torch.nn as nn
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full Oja's Recovery Experiment
@@ -22,143 +22,193 @@ def run_ojas_recovery(
     n_input= 100, n_output=1000, T=50,
     n_trajectories=50, n_epochs=250,
     noise_std=0.0, sparsity=1.0,
-    lr_optimizer=1e-3, grad_clip=0.2, l1_lambda=0.0,
-    seed=22, verbose=True
+    lr_optimizer=1e-3, grad_clip=0.2,
+    seed=42, verbose=True
 ):
     torch.manual_seed(seed)
-    
-    # ── 1. Generate & Move Data ───────────────────────────────────────────
+ 
+    # ── 1. Load (possibly cached) data ───────────────────────────────────────
     X_train, O_train, W_gt_train, obs_idx = generate_ojas_data(
-        n_input=n_input, n_output=n_output, T=T,
-        n_trajectories=n_trajectories,
-        noise_std=noise_std, sparsity=sparsity, seed=seed
+        n_input, n_output, T, n_trajectories, noise_std, sparsity, seed
     )
-    X_train = X_train.to(device)
-    O_train = O_train.to(device)
-    W_gt_train = W_gt_train.to(device)
-    if obs_idx is not None and isinstance(obs_idx, torch.Tensor):
-        obs_idx = obs_idx.to(device)
-        
-    W_inits_train = W_gt_train[:, 0]
-    
-    rule = TaylorRule3Var().to(device)
+    X_train     = X_train.to(device)
+    O_train     = O_train.to(device)
+    W_gt_train  = W_gt_train.to(device)
+    obs_idx     = obs_idx.to(device)
+    W_inits_train = W_gt_train[:, 0]   # (B, n_output, n_input)
+ 
+    # ── 2. Build model ────────────────────────────────────────────────────────
+    rule    = TaylorRule3Var().to(device)
     circuit = CircuitModel(n_input, n_output, rule).to(device)
     optimizer = optim.Adam(rule.parameters(), lr=lr_optimizer)
-    
+ 
     mask_other = np.ones((3, 3, 3), dtype=bool)
-    mask_other[1, 1, 0] = False # Exclude Hebbian
-    mask_other[0, 2, 1] = False # Exclude Decay
-    
+    mask_other[1, 1, 0] = False   # Exclude Hebbian  θ_110
+    mask_other[0, 2, 1] = False   # Exclude Decay    θ_021
+ 
     history = {
         'weight_error_over_time': [],
-        'theta_110': [],
-        'theta_021': [],
-        'other_thetas': []
+        'theta_110':    [],
+        'theta_021':    [],
+        'other_thetas': [],
     }
-    
+ 
+    # ── 3. Training loop ──────────────────────────────────────────────────────
     for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        perm = torch.randperm(len(X_train))
-        
-        # FIX 1: Stochastic Updates (Batch Size = 1)
-        # Keeps the BPTT computational graph tiny and stays in GPU cache.
+ 
+        # Accumulate loss on GPU — avoid per-step .item() syncs (fix 2)
+        epoch_loss_gpu = torch.zeros(1, device=device)
+ 
+        perm = torch.randperm(len(X_train), device=device)
+ 
+        # zero_grad once per epoch, not once per trajectory (fix 1)
+        optimizer.zero_grad()
+ 
         for i in range(len(X_train)):
-            idx = perm[i]
-            
-            # Slicing with [idx:idx+1] maintains the batch dimension (B=1)
-            X_batch = X_train[idx:idx+1]
+            idx = perm[i].item()
+ 
+            X_batch      = X_train[idx:idx+1]
             W_init_batch = W_inits_train[idx:idx+1]
-            O_batch = O_train[idx:idx+1]
-            
-            optimizer.zero_grad()
-            
-            m_pred = circuit.forward(X_batch, W_init=W_init_batch, observed_idx=obs_idx)
+            O_batch      = O_train[idx:idx+1]
+ 
+            # Use fast forward (no W_traj) during training (fix 3)
+            m_pred = circuit_forward_final_W(
+                circuit, X_batch, W_init=W_init_batch, observed_idx=obs_idx
+            )
             loss = mse_loss(m_pred, O_batch)
-                
             loss.backward()
+ 
             torch.nn.utils.clip_grad_norm_(rule.parameters(), grad_clip)
             optimizer.step()
-            
-            epoch_loss += loss.item()
-            
-        epoch_loss /= len(X_train)
-        
-        # FIX 2: Move CPU syncing outside the inner batch loop!
-        # We only transfer memory from GPU to CPU once per epoch now.
+ 
+            # Stay on GPU — no .item() here (fix 2)
+            epoch_loss_gpu += loss.detach()
+ 
+            # zero_grad for next trajectory
+            optimizer.zero_grad()
+ 
+        # Single GPU→CPU sync per epoch (fix 2)
+        epoch_loss = (epoch_loss_gpu / len(X_train)).item()
+ 
+        # ── Coefficient tracking (one CPU sync per epoch — unchanged) ─────
         t_vals = rule.coeffs.detach().cpu().numpy()
         history['theta_110'].append(t_vals[1, 1, 0])
         history['theta_021'].append(t_vals[0, 2, 1])
         history['other_thetas'].append(t_vals[mask_other].tolist())
-        
-        # FIX 3: Efficient weight tracking
-        if epoch % 10 == 0 or epoch == n_epochs - 1:
+ 
+        # ── Weight-error heatmap (every 50 epochs — uses full W_traj) ─────
+        if epoch % 50 == 0 or epoch == n_epochs - 1:
             with torch.no_grad():
-                _, W_pred = circuit_forward_with_weights(circuit, X_train, W_inits_train)
-                min_T = min(W_pred.shape[1], W_gt_train.shape[1])
-                err_per_t = ((W_pred[:, :min_T] - W_gt_train[:, :min_T]) ** 2).mean(dim=(0, 2, 3))
-                history['weight_error_over_time'].append(err_per_t.cpu().numpy().tolist())
+                _, W_pred = circuit_forward_with_weights(
+                    circuit, X_train, W_inits_train, observed_idx=obs_idx
+                )
+                min_T    = min(W_pred.shape[1], W_gt_train.shape[1])
+                err_per_t = (
+                    (W_pred[:, :min_T] - W_gt_train[:, :min_T]) ** 2
+                ).mean(dim=(0, 2, 3))
+                history['weight_error_over_time'].append(
+                    err_per_t.cpu().numpy().tolist()
+                )
         else:
-            history['weight_error_over_time'].append(history['weight_error_over_time'][-1])
-            
+            history['weight_error_over_time'].append(
+                history['weight_error_over_time'][-1]
+            )
+ 
         if verbose and epoch % 50 == 0:
-            print(f"Epoch {epoch:4d} | Activity Loss: {epoch_loss:.6f} | Final W-MSE: {history['weight_error_over_time'][-1][-1]:.6f}")
-
-    # ── Evaluate: R² on FRESH test weight trajectories ─────────────────
+            print(
+                f"Epoch {epoch:4d} | Activity Loss: {epoch_loss:.6f} "
+                f"| Final W-MSE: {history['weight_error_over_time'][-1][-1]:.6f}"
+            )
+ 
+    # ── 4. Evaluate R² on fresh test trajectories ─────────────────────────────
     rule.eval()
     with torch.no_grad():
-        test_seed = seed + 999 
-        X_test, O_test, W_gt_test, _ = generate_ojas_data(
+        test_seed = seed + 999
+ 
+        # Use SAME sparsity & noise as the experiment so test conditions match training
+        # Keep obs_idx_test — it's a different random subset from the test seed
+        X_test, _, W_gt_test, obs_idx_test = generate_ojas_data(
             n_input=n_input, n_output=n_output, T=T,
-            n_trajectories=n_trajectories, 
-            noise_std=noise_std, sparsity=sparsity, seed=test_seed
+            n_trajectories=n_trajectories,
+            noise_std=noise_std,   
+            sparsity=sparsity,    
+            seed=test_seed
         )
-        X_test = X_test.to(device)
-        W_gt_test = W_gt_test.to(device)
+        X_test       = X_test.to(device)
+        W_gt_test    = W_gt_test.to(device)
+        obs_idx_test = obs_idx_test.to(device)
         W_inits_test = W_gt_test[:, 0]
-        
-        _, W_pred_test = circuit_forward_with_weights(circuit, X_test, W_inits_test)
-        mean_r2 = compute_r2(W_pred_test, W_gt_test, W_inits_test)
-    
+ 
+        # Roll out with the test obs_idx (correct subset for this test set)
+        _, W_pred_test = circuit_forward_with_weights(
+            circuit, X_test, W_inits_test, observed_idx=obs_idx_test
+        )
+ 
+        # Score only the observed neurons — what the model actually learned
+        mean_r2 = compute_r2(W_pred_test, W_gt_test, W_inits_test, observed_idx=obs_idx_test)
+ 
     if verbose:
+ 
         print(f"\nMean R² on fresh test weight trajectories (ΔW): {mean_r2:.4f}")
-    
+ 
     return history, mean_r2, rule
 
-
-def circuit_forward_with_weights(circuit, X, W_init):
+def circuit_forward_with_weights(circuit, X, W_init, observed_idx=None):
     B, T, _ = X.shape
-    W = W_init.clone()
-    m_traj, W_traj = [], [W.clone()]
-    
-    # FIX 4: Cleaner matrix operations inside the loop
+    W      = W_init.clone()
+    m_traj = []
+    W_traj = [W.clone()]
+
     for t in range(T):
         x_t = X[:, t, :]
-        
-        # torch.einsum is heavily optimized and avoids unsqueeze/squeeze overhead
         pre = torch.einsum('boi,bi->bo', W, x_t)
         y_t = torch.sigmoid(pre)
-        m_traj.append(y_t)
-        
+
+        # Sparsity = only RECORD observed neurons
+        m = y_t[:, observed_idx] if observed_idx is not None else y_t
+        m_traj.append(m)
+
+        # ALL neurons participate in weight update — matches data_generation.py
         dW = circuit.plasticity_rule(x_t, y_t, W)
-        W = W + circuit.lr * dW
+        W  = W + circuit.lr * dW
         W_traj.append(W.clone())
-    
+
     return torch.stack(m_traj, dim=1), torch.stack(W_traj, dim=1)
 
 
-def compute_r2(W_pred, W_true, W_init):
-    """R² calculated across the entire batched tensor simultaneously."""
-    # W_init is (B, N_out, N_in). We unsqueeze it to (B, 1, N_out, N_in) 
-    # so we can subtract it from the full time sequence
-    W_init_expanded = W_init.unsqueeze(1)
-    
-    delta_W_pred = (W_pred - W_init_expanded).cpu().numpy().flatten()
-    delta_W_true = (W_true - W_init_expanded).cpu().numpy().flatten()
-    
-    ss_res = np.sum((delta_W_true - delta_W_pred) ** 2)
-    ss_tot = np.sum((delta_W_true - delta_W_true.mean()) ** 2)
-    return 1 - ss_res / (ss_tot + 1e-10)
+def circuit_forward_final_W(circuit, X, W_init, observed_idx=None):
+    B, T, _ = X.shape
+    W = W_init.clone()
+    m_traj = []
 
+    for t in range(T):
+        x_t = X[:, t, :]
+        pre = torch.einsum('boi,bi->bo', W, x_t)
+        y_t = torch.sigmoid(pre)
+
+        m = y_t[:, observed_idx] if observed_idx is not None else y_t
+        m_traj.append(m)
+
+        dW = circuit.plasticity_rule(x_t, y_t, W)
+        W = W + circuit.lr * dW
+
+    return torch.stack(m_traj, dim=1)
+
+
+def compute_r2(W_pred, W_true, W_init, observed_idx=None):
+    if observed_idx is not None:
+        # Only score the neurons the model could actually learn from
+        W_pred = W_pred[:, :, observed_idx, :]
+        W_true = W_true[:, :, observed_idx, :]
+        W_init = W_init[:, observed_idx, :]
+    
+    W_init_expanded = W_init.unsqueeze(1)
+    delta_pred = (W_pred - W_init_expanded).flatten()
+    delta_true = (W_true - W_init_expanded).flatten()
+    
+    ss_res = ((delta_true - delta_pred) ** 2).sum()
+    ss_tot = ((delta_true - delta_true.mean()) ** 2).sum()
+    return (1 - ss_res / (ss_tot + 1e-10)).item()
 
 
 
@@ -171,7 +221,7 @@ def run_dynamics_experiment():
     print("Running Training Dynamics (Panels B, C, G)...")
     # Run one long, clean training session for the line graphs and heatmap
     history, _, _ = run_ojas_recovery(
-        noise_std=0.0, sparsity=1.0, n_epochs=250, verbose=True
+        noise_std=0.0, lr_optimizer=3e-3, sparsity=1.0, n_epochs=250, verbose=True
     )
     # The plotting function expects 'other_thetas' to be transposed: shape (25 terms, Epochs)
     # Right now it is (Epochs, 25 terms), so we transpose it here before returning
@@ -181,10 +231,10 @@ def run_dynamics_experiment():
 
 def run_robustness_grid():
     print("Running Grid Search for Robustness (Panels D, E, F)...")
-    noise_levels = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
-    sparsity_levels = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
+    noise_levels = [1.0, 0.0]
+    sparsity_levels = [0.5, 1.0]
 
-    seeds = [20]  # Multiple seeds for each config to get a distribution of R2 scores
+    seeds = [100]  # Multiple seeds for each config to get a distribution of R2 scores
 
     r2_matrix = np.zeros((len(noise_levels), len(sparsity_levels)))
     r2_distributions = {}
@@ -202,9 +252,10 @@ def run_robustness_grid():
                 _, r2, _ = run_ojas_recovery(
                     noise_std=noise,
                     sparsity=sparsity,
-                    n_epochs=250, 
+                    n_epochs=100, 
                     n_trajectories=50,
                     seed=seed,
+                    verbose=True
                 )
                 scores.append(r2)
                 done += 1
@@ -250,7 +301,7 @@ def plot_theta_trajectories(history):
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig("standalone_theta_convergence.png", dpi=200)
+    plt.savefig("theta_convergence.png", dpi=200)
     plt.show()
 
 def plot_all_figures(history, noise_levels, sparsity_levels, r2_matrix, r2_distributions):
@@ -332,7 +383,7 @@ if __name__ == "__main__":
     plot_theta_trajectories(hist)
     
     # 2. Run the massive sweep for Panels D, E & F
-    #n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
+    n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
     
     # 3. Graph everything in one beautiful Matplotlib window
     #plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)

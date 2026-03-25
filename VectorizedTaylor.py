@@ -12,7 +12,7 @@ class TaylorPlasticityRule(nn.Module):
         self.include_reward = include_reward
         
         r_range = range(max_order + 1) if include_reward else [0]
-        """
+        
         self.indices = [
             (a, b, g, r) for a, b, g, r in product(
                 range(max_order + 1), range(max_order + 1),
@@ -20,9 +20,9 @@ class TaylorPlasticityRule(nn.Module):
             )
             if (a + b + g) <= max_order + 1
         ]
-        """
-
         
+
+        """
         self.indices = [
             #(1,0,0,0),   # x
             #(0,1,0,0),   # y
@@ -34,7 +34,7 @@ class TaylorPlasticityRule(nn.Module):
             (0,2,0,0),   # y²
             (0,2,1,0),   # y²w  ← Oja decay
         ]
-        
+        """
         n_terms = len(self.indices)
         self.theta = nn.Parameter(torch.randn(n_terms) * 1e-2)
         
@@ -81,6 +81,26 @@ class TaylorPlasticityRule(nn.Module):
         # Final output shape: (Batch, N_out, N_in)
         return dW
     
+    def get_named_coefficients(self):
+        print("\n=== Taylor Coefficients ===")
+        for k, (a, b, g, rd) in enumerate(self.indices):
+            val = self.theta[k].item()
+            label = f"θ_{a}{b}{g}" + (f"{rd}" if self.include_reward else "")
+            if abs(val) > 1e-3: 
+                print(f"  {label:12s} = {val:+.4f}")
+
+    @classmethod
+    def with_ojas_coefficients(cls):
+        rule = cls(max_order=2, include_reward=False)
+        with torch.no_grad():
+            rule.theta.fill_(0.0)
+            for k, (a, b, g, _) in enumerate(rule.indices):
+                if (a, b, g) == (1, 1, 0):
+                    rule.theta[k] = 1.0    
+                elif (a, b, g) == (0, 2, 1):
+                    rule.theta[k] = -1.0   
+        return rule
+    
 class TaylorRule3Var(nn.Module):
     """Taylor series plasticity rule with 3 variables (x, y, w)."""
     def __init__(self, init_scale=1e-4):
@@ -103,22 +123,3 @@ class TaylorRule3Var(nn.Module):
         dW = H[:, 0, :, :] + H[:, 1, :, :] * w + H[:, 2, :, :] * (w ** 2)
         
         return dW
-    def get_named_coefficients(self):
-        print("\n=== Taylor Coefficients ===")
-        for k, (a, b, g, rd) in enumerate(self.indices):
-            val = self.theta[k].item()
-            label = f"θ_{a}{b}{g}" + (f"{rd}" if self.include_reward else "")
-            if abs(val) > 1e-3: 
-                print(f"  {label:12s} = {val:+.4f}")
-
-    @classmethod
-    def with_ojas_coefficients(cls):
-        rule = cls(max_order=2, include_reward=False)
-        with torch.no_grad():
-            rule.theta.fill_(0.0)
-            for k, (a, b, g, _) in enumerate(rule.indices):
-                if (a, b, g) == (1, 1, 0):
-                    rule.theta[k] = 1.0    
-                elif (a, b, g) == (0, 2, 1):
-                    rule.theta[k] = -1.0   
-        return rule
