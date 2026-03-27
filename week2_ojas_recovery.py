@@ -5,9 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
 from data_generation import generate_ojas_data
-from VectorizedTaylor import TaylorPlasticityRule, TaylorRule3Var
+from VectorizedTaylor import  TaylorRule3Var
 from circuit_model import CircuitModel
-from training import mse_loss
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17,6 +16,10 @@ from training import mse_loss
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(device)
 print(f"Global default device set to: {device}")
+
+def mse_loss(m_traj, o_traj):
+
+    return ((o_traj - m_traj) ** 2).mean()
 
 def run_ojas_recovery(
     n_input= 100, n_output=1000, T=50,
@@ -53,6 +56,7 @@ def run_ojas_recovery(
         'other_thetas': [],
     }
  
+
     # ── 3. Training loop ──────────────────────────────────────────────────────
     for epoch in range(n_epochs):
  
@@ -62,18 +66,18 @@ def run_ojas_recovery(
         perm = torch.randperm(len(X_train), device=device)
  
         # zero_grad once per epoch, not once per trajectory (fix 1)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
  
         for i in range(len(X_train)):
             idx = perm[i].item()
  
             X_batch      = X_train[idx:idx+1]
-            W_init_batch = W_inits_train[idx:idx+1]
             O_batch      = O_train[idx:idx+1]
- 
-            # Use fast forward (no W_traj) during training (fix 3)
-            m_pred = circuit_forward_final_W(
-                circuit, X_batch, W_init=W_init_batch, observed_idx=obs_idx
+            W_init_batch = W_inits_train[idx:idx+1]
+            
+            
+            m_pred = circuit.forward(
+                X_batch, W_init=W_init_batch, observed_idx=obs_idx
             )
             loss = mse_loss(m_pred, O_batch)
             loss.backward()
@@ -81,15 +85,15 @@ def run_ojas_recovery(
             torch.nn.utils.clip_grad_norm_(rule.parameters(), grad_clip)
             optimizer.step()
  
-            # Stay on GPU — no .item() here (fix 2)
+            
             epoch_loss_gpu += loss.detach()
  
             # zero_grad for next trajectory
             optimizer.zero_grad()
  
-        # Single GPU→CPU sync per epoch (fix 2)
+        # Single GPU→CPU sync per epoch 
         epoch_loss = (epoch_loss_gpu / len(X_train)).item()
- 
+        
         # ── Coefficient tracking (one CPU sync per epoch — unchanged) ─────
         t_vals = rule.coeffs.detach().cpu().numpy()
         history['theta_110'].append(t_vals[1, 1, 0])
@@ -119,7 +123,7 @@ def run_ojas_recovery(
                 f"Epoch {epoch:4d} | Activity Loss: {epoch_loss:.6f} "
                 f"| Final W-MSE: {history['weight_error_over_time'][-1][-1]:.6f}"
             )
- 
+        
     # ── 4. Evaluate R² on fresh test trajectories ─────────────────────────────
     rule.eval()
     with torch.no_grad():
@@ -137,7 +141,7 @@ def run_ojas_recovery(
         X_test       = X_test.to(device)
         W_gt_test    = W_gt_test.to(device)
         obs_idx_test = obs_idx_test.to(device)
-        W_inits_test = W_gt_test[:, 0]
+        W_inits_test = W_gt_test[:, 0]   # (B, n_output, n_input)
  
         # Roll out with the test obs_idx (correct subset for this test set)
         _, W_pred_test = circuit_forward_with_weights(
@@ -145,7 +149,9 @@ def run_ojas_recovery(
         )
  
         # Score only the observed neurons — what the model actually learned
-        mean_r2 = compute_r2(W_pred_test, W_gt_test, W_inits_test, observed_idx=obs_idx_test)
+        mean_r2 = compute_r2(W_pred_test, W_gt_test, W_inits_test, observed_idx=None)
+        del W_pred_test, X_test, W_gt_test, X_train, O_train # Force delete large objects
+        torch.cuda.empty_cache()
  
     if verbose:
  
@@ -155,61 +161,57 @@ def run_ojas_recovery(
 
 def circuit_forward_with_weights(circuit, X, W_init, observed_idx=None):
     B, T, _ = X.shape
-    W      = W_init.clone()
+    W = W_init.clone()
     m_traj = []
     W_traj = [W.clone()]
 
     for t in range(T):
         x_t = X[:, t, :]
-        pre = torch.einsum('boi,bi->bo', W, x_t)
-        y_t = torch.sigmoid(pre)
-
-        # Sparsity = only RECORD observed neurons
+        
+        y_t = torch.sigmoid(torch.einsum('boi,bi->bo', W, x_t))
+        
+        y_sparse = torch.zeros_like(y_t)
+        if observed_idx is not None:
+            y_sparse[:, observed_idx] = y_t[:, observed_idx] # Add the colons!
+            mask = torch.zeros_like(W)
+            mask[:, observed_idx, :] = 1.0
+            W = W * mask
+        else:
+            y_sparse = y_t
+        
         m = y_t[:, observed_idx] if observed_idx is not None else y_t
         m_traj.append(m)
 
-        # ALL neurons participate in weight update — matches data_generation.py
-        dW = circuit.plasticity_rule(x_t, y_t, W)
-        W  = W + circuit.lr * dW
+        
+        dW = circuit.plasticity_rule(x_t, y_sparse, W, observed_idx=observed_idx)
+        W = W + circuit.lr * dW
         W_traj.append(W.clone())
 
     return torch.stack(m_traj, dim=1), torch.stack(W_traj, dim=1)
 
 
-def circuit_forward_final_W(circuit, X, W_init, observed_idx=None):
-    B, T, _ = X.shape
-    W = W_init.clone()
-    m_traj = []
-
-    for t in range(T):
-        x_t = X[:, t, :]
-        pre = torch.einsum('boi,bi->bo', W, x_t)
-        y_t = torch.sigmoid(pre)
-
-        m = y_t[:, observed_idx] if observed_idx is not None else y_t
-        m_traj.append(m)
-
-        dW = circuit.plasticity_rule(x_t, y_t, W)
-        W = W + circuit.lr * dW
-
-    return torch.stack(m_traj, dim=1)
 
 
+    
 def compute_r2(W_pred, W_true, W_init, observed_idx=None):
+    W_pred = W_pred.cpu()
+    W_true = W_true.cpu()
+    W_init = W_init.cpu()
+
     if observed_idx is not None:
-        # Only score the neurons the model could actually learn from
+        observed_idx = observed_idx.cpu()
         W_pred = W_pred[:, :, observed_idx, :]
         W_true = W_true[:, :, observed_idx, :]
-        W_init = W_init[:, observed_idx, :]
-    
-    W_init_expanded = W_init.unsqueeze(1)
-    delta_pred = (W_pred - W_init_expanded).flatten()
-    delta_true = (W_true - W_init_expanded).flatten()
-    
-    ss_res = ((delta_true - delta_pred) ** 2).sum()
-    ss_tot = ((delta_true - delta_true.mean()) ** 2).sum()
-    return (1 - ss_res / (ss_tot + 1e-10)).item()
+        W_init = W_init[:, observed_idx, :]   # 🔥 THIS LINE WAS MISSING
 
+    W_init_expanded = W_init.unsqueeze(1)
+
+    ss_res = ((W_true - W_pred) ** 2).sum()
+
+    delta_true = W_true - W_init_expanded
+    ss_tot = ((delta_true - delta_true.mean()) ** 2).sum()
+
+    return (1 - ss_res / (ss_tot + 1e-10)).item()
 
 
 
@@ -221,7 +223,7 @@ def run_dynamics_experiment():
     print("Running Training Dynamics (Panels B, C, G)...")
     # Run one long, clean training session for the line graphs and heatmap
     history, _, _ = run_ojas_recovery(
-        noise_std=0.0, lr_optimizer=3e-3, sparsity=1.0, n_epochs=250, verbose=True
+        noise_std=0.0, lr_optimizer=5e-3, sparsity=1.0, n_epochs=200, verbose=True
     )
     # The plotting function expects 'other_thetas' to be transposed: shape (25 terms, Epochs)
     # Right now it is (Epochs, 25 terms), so we transpose it here before returning
@@ -231,10 +233,10 @@ def run_dynamics_experiment():
 
 def run_robustness_grid():
     print("Running Grid Search for Robustness (Panels D, E, F)...")
-    noise_levels = [1.0, 0.0]
-    sparsity_levels = [0.5, 1.0]
+    noise_levels = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    sparsity_levels = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5]
 
-    seeds = [100]  # Multiple seeds for each config to get a distribution of R2 scores
+    seeds = [120]  # Multiple seeds for each config to get a distribution of R2 scores
 
     r2_matrix = np.zeros((len(noise_levels), len(sparsity_levels)))
     r2_distributions = {}
@@ -250,15 +252,17 @@ def run_robustness_grid():
                 
                 # Call our optimized batched engine
                 _, r2, _ = run_ojas_recovery(
+                    lr_optimizer=1e-3,
                     noise_std=noise,
                     sparsity=sparsity,
-                    n_epochs=100, 
+                    n_epochs=250, 
                     n_trajectories=50,
                     seed=seed,
                     verbose=True
                 )
                 scores.append(r2)
                 done += 1
+                torch.cuda.empty_cache() 
 
             r2_matrix[i, j] = np.mean(scores)
             r2_distributions[(noise, sparsity)] = scores
@@ -339,7 +343,7 @@ def plot_all_figures(history, noise_levels, sparsity_levels, r2_matrix, r2_distr
 
     # --- PANEL D: R2 Heatmap ---
     ax_D = fig.add_subplot(234)
-    im2 = ax_D.imshow(r2_matrix, cmap='viridis', aspect='auto', vmin=-1, vmax=1)
+    im2 = ax_D.imshow(r2_matrix, cmap='viridis', aspect='auto', vmin=0, vmax=1)
     ax_D.set_xticks(np.arange(len(sparsity_levels))); ax_D.set_xticklabels(sparsity_levels)
     ax_D.set_yticks(np.arange(len(noise_levels))); ax_D.set_yticklabels(noise_levels)
     rect = patches.Rectangle((-0.5, -0.5), len(sparsity_levels), 1, linewidth=2, edgecolor='deeppink', facecolor='none')
@@ -356,7 +360,7 @@ def plot_all_figures(history, noise_levels, sparsity_levels, r2_matrix, r2_distr
 
     # Dynamically grab the baseline coordinates ──
     baseline_sparsity = sparsity_levels[0]  
-    baseline_noise = noise_levels[-1]      
+    baseline_noise = noise_levels[0] 
 
     # --- PANEL E: Boxplot by Noise (Sparsity = Baseline) ---
     ax_E = fig.add_subplot(235)
@@ -386,4 +390,4 @@ if __name__ == "__main__":
     n_levs, s_levs, r2_mat, r2_dists = run_robustness_grid()
     
     # 3. Graph everything in one beautiful Matplotlib window
-    #plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)
+    plot_all_figures(hist, n_levs, s_levs, r2_mat, r2_dists)

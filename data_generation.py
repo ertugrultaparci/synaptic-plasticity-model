@@ -1,4 +1,6 @@
 # data_generation.py
+import math
+
 import matplotlib
 matplotlib.use('Agg')
 import torch
@@ -92,6 +94,7 @@ def generate_ojas_data(
     # Which output neurons are observed (for sparsity experiments)
     n_observed = int(n_output * sparsity)
     observed_idx = torch.randperm(n_output)[:n_observed]
+    
 
    
     
@@ -105,13 +108,15 @@ def generate_ojas_data(
         W = torch.randn(n_output, n_input) * std_w
         
         X_traj, O_traj, W_traj = [], [], [W.clone()]
+      
         
         for t in range(T):
             # Input: sampled from Gaussian with mean 0, var 0.1 (as in paper Appendix A.3)
-            x = torch.randn(n_input) * torch.sqrt(torch.tensor(0.1))
+            x = torch.randn(n_input) *  math.sqrt(0.1)
             
             # Forward pass
             y = sigmoid(W @ x)  # shape (n_output,)
+            
             
             # Observe subset of neurons + add noise
             o = y[observed_idx].clone()
@@ -119,9 +124,13 @@ def generate_ojas_data(
                 o = o + torch.randn_like(o) * noise_std
                 o = torch.clamp(o, 0.0, 1.0)
             
+            y_sparse = torch.zeros_like(y)
+            y_sparse[observed_idx] = o
+            
             # Weight update using Oja's rule
-            dW = ojas_rule(x, y, W)
-            W = W +  lr *dW
+            dW = ojas_rule(x, y_sparse, W)
+            W = W + dW 
+            
             
             X_traj.append(x)
             O_traj.append(o)
